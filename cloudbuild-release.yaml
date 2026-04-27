@@ -1,0 +1,118 @@
+# Cloud Build release pipeline for audit-verify.
+# Fires on version tags (v[0-9]*) via a Cloud Build trigger in relayone-488319.
+# Builds four platform binaries, signs each with cosign + GCP KMS,
+# and creates a GitHub release with all artifacts.
+#
+# NOTE: CI/CD runs on GCP Cloud Build, not GitHub Actions.
+# See BUILD.md for setup instructions.
+steps:
+  - name: golang:1.21
+    id: build-linux-amd64
+    env:
+      - CGO_ENABLED=0
+      - GOOS=linux
+      - GOARCH=amd64
+    args: [go, build, -ldflags=-s -w, -o, /workspace/dist/audit-verify-linux-amd64, .]
+
+  - name: golang:1.21
+    id: build-darwin-amd64
+    waitFor: ["-"]
+    env:
+      - CGO_ENABLED=0
+      - GOOS=darwin
+      - GOARCH=amd64
+    args: [go, build, -ldflags=-s -w, -o, /workspace/dist/audit-verify-darwin-amd64, .]
+
+  - name: golang:1.21
+    id: build-darwin-arm64
+    waitFor: ["-"]
+    env:
+      - CGO_ENABLED=0
+      - GOOS=darwin
+      - GOARCH=arm64
+    args: [go, build, -ldflags=-s -w, -o, /workspace/dist/audit-verify-darwin-arm64, .]
+
+  - name: golang:1.21
+    id: build-windows-amd64
+    waitFor: ["-"]
+    env:
+      - CGO_ENABLED=0
+      - GOOS=windows
+      - GOARCH=amd64
+    args: [go, build, -ldflags=-s -w, -o, /workspace/dist/audit-verify-windows-amd64.exe, .]
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: sha256sums
+    waitFor: [build-linux-amd64, build-darwin-amd64, build-darwin-arm64, build-windows-amd64]
+    script: |
+      #!/bin/bash
+      sha256sum /workspace/dist/audit-verify-* > /workspace/dist/SHA256SUMS
+      cat /workspace/dist/SHA256SUMS
+
+  - name: gcr.io/projectsigstore/cosign:v2
+    id: cosign-linux-amd64
+    waitFor: [sha256sums]
+    args:
+      - sign-blob
+      - /workspace/dist/audit-verify-linux-amd64
+      - --key
+      - gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing
+      - --output-signature
+      - /workspace/dist/audit-verify-linux-amd64.sig
+
+  - name: gcr.io/projectsigstore/cosign:v2
+    id: cosign-darwin-amd64
+    waitFor: [sha256sums]
+    args:
+      - sign-blob
+      - /workspace/dist/audit-verify-darwin-amd64
+      - --key
+      - gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing
+      - --output-signature
+      - /workspace/dist/audit-verify-darwin-amd64.sig
+
+  - name: gcr.io/projectsigstore/cosign:v2
+    id: cosign-darwin-arm64
+    waitFor: [sha256sums]
+    args:
+      - sign-blob
+      - /workspace/dist/audit-verify-darwin-arm64
+      - --key
+      - gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing
+      - --output-signature
+      - /workspace/dist/audit-verify-darwin-arm64.sig
+
+  - name: gcr.io/projectsigstore/cosign:v2
+    id: cosign-windows-amd64
+    waitFor: [sha256sums]
+    args:
+      - sign-blob
+      - /workspace/dist/audit-verify-windows-amd64.exe
+      - --key
+      - gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing
+      - --output-signature
+      - /workspace/dist/audit-verify-windows-amd64.exe.sig
+
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: github-release
+    waitFor: [cosign-linux-amd64, cosign-darwin-amd64, cosign-darwin-arm64, cosign-windows-amd64]
+    secretEnv: [GITHUB_TOKEN]
+    script: |
+      #!/bin/bash
+      set -euo pipefail
+      export GH_TOKEN="$GITHUB_TOKEN"
+      TAG="${TAG_NAME}"
+      gh release create "$TAG" /workspace/dist/* \
+        --repo RelayOne/audit-verify \
+        --title "audit-verify ${TAG}" \
+        --notes-file RELEASES.md
+
+availableSecrets:
+  secretManager:
+    - versionName: projects/relayone-488319/secrets/github-release-token/versions/latest
+      env: GITHUB_TOKEN
+
+serviceAccount: projects/relayone-488319/serviceAccounts/release-builder@relayone-488319.iam.gserviceaccount.com
+
+options:
+  logging: CLOUD_LOGGING_ONLY
