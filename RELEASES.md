@@ -51,11 +51,37 @@ All four platform artifacts are cosign-signed using a GCP KMS key in
 
 ### Verifying the signatures
 
+Direct GCP KMS verification (anyone with read access to the key resource —
+the key is `purpose=ASYMMETRIC_SIGN` so the public half is freely readable
+without auth):
+
 ```bash
+# Linux x86-64 example. Substitute the binary + .sig pair for your platform.
 cosign verify-blob audit-verify-linux-amd64 \
   --key gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing \
   --signature audit-verify-linux-amd64.sig
 ```
+
+Offline / air-gapped verification with the exported public key:
+
+```bash
+# 1. Export the public key once (do this on a connected host).
+gcloud kms keys versions get-public-key 1 \
+  --key=audit-verify-signing \
+  --keyring=release-signing \
+  --location=global \
+  --project=relayone-488319 \
+  > audit-verify.pub
+
+# 2. Verify on the air-gapped host using only the exported pub key.
+cosign verify-blob audit-verify-linux-amd64 \
+  --key audit-verify.pub \
+  --signature audit-verify-linux-amd64.sig
+```
+
+Both paths print `Verified OK` on success and exit 0. Any tampering
+(including a single bit flip in the binary) causes a non-zero exit and
+`Error: invalid signature when validating ASN.1 encoded signature`.
 
 See `BUILD.md` for full cosign verification instructions.
 
