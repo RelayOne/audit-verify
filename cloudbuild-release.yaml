@@ -48,6 +48,8 @@ steps:
       #!/bin/bash
       sha256sum /workspace/dist/audit-verify-* > /workspace/dist/SHA256SUMS
       cat /workspace/dist/SHA256SUMS
+      # Cosign container runs as non-root; ensure all users can write signatures.
+      chmod -R a+w /workspace/dist
 
   - name: gcr.io/projectsigstore/cosign:v2.2.0
     id: cosign-linux-amd64
