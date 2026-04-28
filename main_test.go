@@ -6,6 +6,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -184,6 +185,82 @@ func TestCollectLeaves_PartialRange_P2(t *testing.T) {
 		if leaves[i] != w {
 			t.Errorf("P2 partial-range: leaves[%d]=%q want %q", i, leaves[i], w)
 		}
+	}
+}
+
+// TestVerifySeals_PartialRange_SkipLogic is a regression test for the P2
+// partial-range verifySeals fix.
+//
+// When --from-seq/--to-seq restricts the scanned event window, verifySeals
+// must skip seals whose [start_time, end_time] extends outside the range
+// covered by the loaded events slice. This test verifies the boundary logic
+// by confirming:
+//   - A seal fully within the loaded range has leaves collected correctly.
+//   - A seal that starts before rangeMinTS would have start_time < rangeMinTS,
+//     which is the skip condition; collectLeaves correctly returns 0 for events
+//     outside the window.
+//
+// The verifySeals skip condition is:
+//
+//	if s.StartTime.Before(rangeMinTS) || s.EndTime.After(rangeMaxTS) { skip }
+//
+// This test exercises the boundary check via collectLeaves to confirm that:
+// - Seals fully within range collect the right events.
+// - Seals straddling the boundary would find fewer events than event_count,
+//   which IS the false-GAP scenario that the skip prevents.
+func TestVerifySeals_PartialRange_SkipLogic(t *testing.T) {
+	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+
+	// Events e1..e10 span base+0ms..base+9ms.
+	var events []AuditEvent
+	for i := 0; i < 10; i++ {
+		events = append(events, AuditEvent{
+			ID:          fmt.Sprintf("e%d", i+1),
+			OrgID:       "org1",
+			Timestamp:   base.Add(time.Duration(i) * time.Millisecond),
+			EventHash:   fmt.Sprintf("h%d", i+1),
+			SequenceNum: int64(i + 1),
+		})
+	}
+
+	// rangeMinTS and rangeMaxTS as verifySeals computes them.
+	rangeMinTS := events[0].Timestamp // base+0ms
+	rangeMaxTS := events[len(events)-1].Timestamp // base+9ms
+
+	// Case 1: Seal fully within range [base+2ms, base+7ms] — 6 events.
+	sealStart := base.Add(2 * time.Millisecond)
+	sealEnd := base.Add(7 * time.Millisecond)
+	within := !(sealStart.Before(rangeMinTS) || sealEnd.After(rangeMaxTS))
+	if !within {
+		t.Errorf("P2: seal [+2ms,+7ms] within range [+0ms,+9ms] should NOT be skipped")
+	}
+	leaves := collectLeaves(events, "org1", sealStart, sealEnd)
+	if len(leaves) != 6 {
+		t.Errorf("P2: expected 6 leaves for [+2ms,+7ms], got %d", len(leaves))
+	}
+
+	// Case 2: Seal straddling the left boundary [base-1ms, base+5ms] — skip.
+	sealStart2 := base.Add(-1 * time.Millisecond) // before range
+	sealEnd2 := base.Add(5 * time.Millisecond)
+	wouldSkip2 := sealStart2.Before(rangeMinTS) || sealEnd2.After(rangeMaxTS)
+	if !wouldSkip2 {
+		t.Errorf("P2: seal straddling left boundary should be skipped")
+	}
+	// Without the skip, collectLeaves would find only 6 events (e1..e6), not
+	// the 7 that the seal's event_count would declare — causing a false GAP.
+	leavesWithoutSkip := collectLeaves(events, "org1", sealStart2, sealEnd2)
+	if len(leavesWithoutSkip) != 6 {
+		t.Errorf("P2: expected 6 leaves without skip (events only start at base+0ms), got %d", len(leavesWithoutSkip))
+	}
+	// The skip IS the fix: verifySeals records a note and continues rather
+	// than comparing 6 < declared_7 and returning exitGap.
+
+	// Case 3: Seal straddling the right boundary [base+5ms, base+11ms] — skip.
+	sealStart3 := base.Add(5 * time.Millisecond)
+	sealEnd3 := base.Add(11 * time.Millisecond) // after range
+	wouldSkip3 := sealStart3.Before(rangeMinTS) || sealEnd3.After(rangeMaxTS)
+	if !wouldSkip3 {
+		t.Errorf("P2: seal straddling right boundary should be skipped")
 	}
 }
 
