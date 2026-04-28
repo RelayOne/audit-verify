@@ -1,5 +1,53 @@
 # Releases
 
+## v1.0.1 (2026-04-27)
+
+Patch release fixing one P1 and three P2 correctness issues found in the codex
+review of v1.0.0.
+
+### Fixes
+
+- **P1 — same-ms event ordering causes false TAMPERED** (`main.go`)
+  `collectLeaves` broke same-millisecond timestamp ties by event ID (ULID
+  lexical order). On high-throughput tenants where two consecutive events land
+  within the same millisecond, their ULID sort order can differ from chain-append
+  order, producing a `MERKLE_MISMATCH` on a valid sealed batch (or a false
+  `TAMPERED` during chain-hash walk). Fixed: tie-break by `SequenceNum`
+  (chain-append position assigned during `scanEvents`) to match the server-side
+  advisory-lock serialization order. Regression tests in `main_test.go`.
+
+- **P2 — partial-range `--from-seq`/`--to-seq` broken with seal checks** (`main.go`)
+  `verifySeals` walked all seals for the org but recomputed Merkle roots from
+  the truncated event slice. Any seal straddling the boundary of the scan range
+  would declare `event_count=N` but find fewer rows, producing a false `GAP` or
+  `MERKLE_MISMATCH`. Fixed: compute the timestamp range covered by loaded events;
+  skip seals whose window extends outside that range (recorded in `res.Notes`).
+  Regression test: `TestCollectLeaves_PartialRange_P2`.
+
+- **P2 — cosign KMS URI malformed in BUILD.md** (`BUILD.md`)
+  The `cosign verify-blob` recipe used
+  `keyRings/<ring>/cryptoKeyVersions/<key>/cryptoKeyVersions/1` (wrong).
+  The correct form is `keyRings/<ring>/cryptoKeys/<key>/cryptoKeyVersions/1`.
+  The malformed URI caused cosign to fail to resolve the public key.
+
+- **P2 — `TestCrossTenantIsolation` hardcodes Linux binary path** (`stresstest/`)
+  The stresstest shelled out to `../audit-verify-linux-amd64`, which is not
+  tracked by git and is platform-specific. Fixed: `resolveVerifierBinary()`
+  honours `AUDIT_VERIFY_BINARY` (allows injecting a pre-built or cross-compiled
+  binary) and falls back to building from source via `go build`. Tests now work
+  on a clean checkout and on any platform.
+
+### Artifacts
+
+Same artifact list as v1.0.0. All four platform binaries are cosign-signed using
+the canonical KMS URI:
+
+```
+gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing/cryptoKeyVersions/1
+```
+
+---
+
 ## v1.0.0 (2026-04-27)
 
 First public release. Split from the RelayOne monorepo
