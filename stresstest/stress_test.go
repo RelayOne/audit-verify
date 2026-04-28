@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +29,6 @@ import (
 )
 
 const (
-	binaryRel = "../audit-verify-linux-amd64"
 	orgID     = "rl_org_stress"
 	totalEv   = 10_000
 	batchSize = 500 // 20 seals
@@ -317,17 +317,68 @@ func writePubkey(t *testing.T, hexKey string) string {
 	return p
 }
 
+// resolveVerifierBinary returns the path to the audit-verify binary to use for
+// integration tests.
+//
+// P2 fix (hardcoded binary path): honour the AUDIT_VERIFY_BINARY environment
+// variable so callers can inject a pre-built binary (e.g. a freshly compiled
+// v1.0.1 binary, or a cross-compiled binary in CI). When the variable is not
+// set, build the binary from source for the current platform and cache it in a
+// temp directory for the lifetime of the test run. This removes the requirement
+// for a pre-existing ../audit-verify-linux-amd64 and makes the test runnable
+// on macOS, Windows, and from a clean git clone.
+var (
+	resolvedBinary     string
+	resolvedBinaryOnce sync.Once
+)
+
+func resolveVerifierBinary(t *testing.T) string {
+	t.Helper()
+	resolvedBinaryOnce.Do(func() {
+		if v := os.Getenv("AUDIT_VERIFY_BINARY"); v != "" {
+			abs, err := filepath.Abs(v)
+			if err != nil {
+				// Don't fatal here — we're inside sync.Once; let the test fail.
+				resolvedBinary = v
+				return
+			}
+			resolvedBinary = abs
+			return
+		}
+		// Build from source into a temp dir.
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "audit-verify-test")
+		src, err := filepath.Abs("..")
+		if err != nil {
+			resolvedBinary = ""
+			return
+		}
+		cmd := exec.Command("go", "build", "-o", bin, src)
+		cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			// Store empty string; tests will call t.Fatalf when they call the binary.
+			t.Logf("build audit-verify from source failed: %v\n%s", err, stderr.String())
+			resolvedBinary = ""
+			return
+		}
+		resolvedBinary = bin
+	})
+	if resolvedBinary == "" {
+		t.Fatal("could not locate or build audit-verify binary; set AUDIT_VERIFY_BINARY or ensure 'go build' works from the repo root")
+	}
+	return resolvedBinary
+}
+
 func runVerifier(t *testing.T, args ...string) (string, int) {
 	t.Helper()
-	bin, err := filepath.Abs(binaryRel)
-	if err != nil {
-		t.Fatalf("abs: %v", err)
-	}
+	bin := resolveVerifierBinary(t)
 	cmd := exec.Command(bin, args...)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	err = cmd.Run()
+	err := cmd.Run()
 	code := 0
 	if exit, ok := err.(*exec.ExitError); ok {
 		code = exit.ExitCode()
