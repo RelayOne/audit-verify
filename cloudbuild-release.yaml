@@ -107,11 +107,13 @@ steps:
     id: github-release
     waitFor: [cosign-linux-amd64, cosign-darwin-amd64, cosign-darwin-arm64, cosign-windows-amd64]
     secretEnv: [GITHUB_TOKEN]
+    env:
+      - TAG_NAME=$_TAG_NAME
     script: |
       #!/bin/bash
       set -euo pipefail
       export GH_TOKEN="$GITHUB_TOKEN"
-      TAG="${_TAG_NAME}"
+      TAG="$TAG_NAME"
       # Create the release if it does not exist, then upload (--clobber) artifacts.
       # This handles both the first-time case and re-runs against an existing tag.
       if gh release view "$TAG" --repo RelayOne/audit-verify &>/dev/null; then
