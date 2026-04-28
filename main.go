@@ -318,6 +318,13 @@ func finish(res *Result) {
 // On the first divergence (tamper or gap) it sets res.FirstFailureRow and
 // returns an exitErr with the appropriate code so callers can finish + emit
 // before exiting.
+//
+// P1 fix: sort by (org_id, timestamp, id) only as a first-pass ordering.
+// Chain integrity is verified via previous_event_hash linkage, not by sort
+// position. SequenceNum is assigned in scan order (chain-append order) so that
+// collectLeaves can use it as a tie-breaker for same-millisecond events,
+// matching the server-side serialized-append order rather than ULID lexical
+// order which may differ.
 func scanEvents(ctx context.Context, db *sql.DB, cfg *config, res *Result) ([]AuditEvent, error) {
 	q := fmt.Sprintf(`
 		SELECT
@@ -438,6 +445,14 @@ func nullStr(ns sql.NullString) string {
 // recomputes the Merkle root over the events whose timestamp is in
 // [start_time, end_time], compares to the stored merkle_root, and verifies
 // the Ed25519 signature.
+//
+// P2 fix (partial-range): when --from-seq or --to-seq restricts the scanned
+// window, only verify seals whose event time window is fully covered by the
+// events we actually loaded. A seal that straddles the boundary of the scan
+// range (i.e. it spans events both inside and outside the range) will have
+// fewer events in-memory than its event_count declares, which would produce
+// a false GAP. Such seals are skipped with a note rather than flagged as
+// broken.
 func verifySeals(
 	ctx context.Context,
 	db *sql.DB,
@@ -446,6 +461,23 @@ func verifySeals(
 	events []AuditEvent,
 	pubKey ed25519.PublicKey,
 ) error {
+	// Determine the timestamp range covered by the events we actually loaded,
+	// so we can skip seals that straddle the boundary.
+	partialRange := cfg.fromSeq > 0 || cfg.toSeq > 0
+	var rangeMinTS, rangeMaxTS time.Time
+	if partialRange && len(events) > 0 {
+		rangeMinTS = events[0].Timestamp
+		rangeMaxTS = events[0].Timestamp
+		for _, e := range events[1:] {
+			if e.Timestamp.Before(rangeMinTS) {
+				rangeMinTS = e.Timestamp
+			}
+			if e.Timestamp.After(rangeMaxTS) {
+				rangeMaxTS = e.Timestamp
+			}
+		}
+	}
+
 	q := fmt.Sprintf(`
 		SELECT
 			id,
@@ -495,6 +527,23 @@ func verifySeals(
 			return newExitErr(exitDB, "scan seal row: %v", err)
 		}
 		res.SealsScanned++
+
+		// P2 fix (partial-range): skip seals that are not fully covered by the
+		// events we loaded. A seal is "fully covered" when its entire time window
+		// [start_time, end_time] falls within [rangeMinTS, rangeMaxTS]. If the
+		// seal straddles the boundary we can't reconstruct its Merkle root from
+		// the truncated event set, so we record a note and move on.
+		if partialRange && len(events) > 0 {
+			if s.StartTime.Before(rangeMinTS) || s.EndTime.After(rangeMaxTS) {
+				res.Notes = append(res.Notes, fmt.Sprintf(
+					"seal %s (batch %d) skipped — window [%s..%s] outside partial scan range [%s..%s]",
+					s.ID, s.BatchNumber,
+					s.StartTime.Format(time.RFC3339), s.EndTime.Format(time.RFC3339),
+					rangeMinTS.Format(time.RFC3339), rangeMaxTS.Format(time.RFC3339),
+				))
+				continue
+			}
+		}
 
 		// 1. Verify signature
 		if !cfg.skipSealCheck {
@@ -575,8 +624,14 @@ func verifySeals(
 }
 
 // collectLeaves returns the event hashes whose timestamps fall in
-// [startTime, endTime] for a given org, sorted by timestamp ascending,
-// matching the immutable-log.service.ts seal builder.
+// [startTime, endTime] for a given org, sorted by chain-append order
+// (SequenceNum), matching the server-side Merkle tree construction.
+//
+// P1 fix: tie-break same-millisecond events by SequenceNum (chain position)
+// instead of ID lexical order. The server-side seal builder (immutable-log.service.ts)
+// serialises events via an advisory-locked transaction, so chain-append order
+// is the canonical ordering for the Merkle tree — not ULID sort, which may
+// differ when two events land within the same millisecond.
 func collectLeaves(events []AuditEvent, orgID string, startTime, endTime time.Time) []string {
 	var matched []AuditEvent
 	for _, e := range events {
@@ -592,7 +647,8 @@ func collectLeaves(events []AuditEvent, orgID string, startTime, endTime time.Ti
 		if !matched[i].Timestamp.Equal(matched[j].Timestamp) {
 			return matched[i].Timestamp.Before(matched[j].Timestamp)
 		}
-		return matched[i].ID < matched[j].ID
+		// Same millisecond: use chain-append order (SequenceNum) as tie-breaker.
+		return matched[i].SequenceNum < matched[j].SequenceNum
 	})
 	out := make([]string, len(matched))
 	for i, e := range matched {
