@@ -102,10 +102,19 @@ steps:
       set -euo pipefail
       export GH_TOKEN="$GITHUB_TOKEN"
       TAG="${TAG_NAME}"
-      gh release create "$TAG" /workspace/dist/* \
-        --repo RelayOne/audit-verify \
-        --title "audit-verify ${TAG}" \
-        --notes-file RELEASES.md
+      # Create the release if it does not exist, then upload (--clobber) artifacts.
+      # This handles both the first-time case and re-runs against an existing tag.
+      if gh release view "$TAG" --repo RelayOne/audit-verify &>/dev/null; then
+        echo "Release $TAG already exists — uploading/replacing assets."
+        gh release upload "$TAG" /workspace/dist/* \
+          --repo RelayOne/audit-verify \
+          --clobber
+      else
+        gh release create "$TAG" /workspace/dist/* \
+          --repo RelayOne/audit-verify \
+          --title "audit-verify ${TAG}" \
+          --notes-file RELEASES.md
+      fi
 
 availableSecrets:
   secretManager:
