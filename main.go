@@ -533,16 +533,14 @@ func verifySeals(
 		// [start_time, end_time] falls within [rangeMinTS, rangeMaxTS]. If the
 		// seal straddles the boundary we can't reconstruct its Merkle root from
 		// the truncated event set, so we record a note and move on.
-		if partialRange && len(events) > 0 {
-			if s.StartTime.Before(rangeMinTS) || s.EndTime.After(rangeMaxTS) {
-				res.Notes = append(res.Notes, fmt.Sprintf(
-					"seal %s (batch %d) skipped — window [%s..%s] outside partial scan range [%s..%s]",
-					s.ID, s.BatchNumber,
-					s.StartTime.Format(time.RFC3339), s.EndTime.Format(time.RFC3339),
-					rangeMinTS.Format(time.RFC3339), rangeMaxTS.Format(time.RFC3339),
-				))
-				continue
-			}
+		if partialRange && len(events) > 0 && sealOutsideRange(s, rangeMinTS, rangeMaxTS) {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"seal %s (batch %d) skipped — window [%s..%s] outside partial scan range [%s..%s]",
+				s.ID, s.BatchNumber,
+				s.StartTime.Format(time.RFC3339), s.EndTime.Format(time.RFC3339),
+				rangeMinTS.Format(time.RFC3339), rangeMaxTS.Format(time.RFC3339),
+			))
+			continue
 		}
 
 		// 1. Verify signature
@@ -621,6 +619,17 @@ func verifySeals(
 		return newExitErr(exitDB, "iterate seal rows: %v", err)
 	}
 	return nil
+}
+
+// sealOutsideRange returns true when the seal's [StartTime, EndTime] window
+// is not fully contained within [rangeMinTS, rangeMaxTS].
+//
+// verifySeals calls this to decide whether to skip a seal when a partial
+// event range (--from-seq / --to-seq) has been requested: a seal that
+// straddles the boundary of the loaded events cannot have its Merkle root
+// faithfully reconstructed from the truncated slice.
+func sealOutsideRange(s Seal, rangeMinTS, rangeMaxTS time.Time) bool {
+	return s.StartTime.Before(rangeMinTS) || s.EndTime.After(rangeMaxTS)
 }
 
 // collectLeaves returns the event hashes whose timestamps fall in

@@ -193,25 +193,23 @@ func TestCollectLeaves_PartialRange_P2(t *testing.T) {
 //
 // When --from-seq/--to-seq restricts the scanned event window, verifySeals
 // must skip seals whose [start_time, end_time] extends outside the range
-// covered by the loaded events slice. This test verifies the boundary logic
-// by confirming:
-//   - A seal fully within the loaded range has leaves collected correctly.
-//   - A seal that starts before rangeMinTS would have start_time < rangeMinTS,
-//     which is the skip condition; collectLeaves correctly returns 0 for events
-//     outside the window.
+// covered by the loaded events slice. This test calls the real sealOutsideRange
+// helper extracted from verifySeals so that a regression in that function would
+// directly break this test.
 //
-// The verifySeals skip condition is:
+// The fix adds this guard to verifySeals:
 //
-//	if s.StartTime.Before(rangeMinTS) || s.EndTime.After(rangeMaxTS) { skip }
+//	if partialRange && len(events) > 0 && sealOutsideRange(s, rangeMinTS, rangeMaxTS) {
+//	    res.Notes = append(res.Notes, "seal ... skipped — window ... outside partial scan range ...")
+//	    continue
+//	}
 //
-// This test exercises the boundary check via collectLeaves to confirm that:
-// - Seals fully within range collect the right events.
-// - Seals straddling the boundary would find fewer events than event_count,
-//   which IS the false-GAP scenario that the skip prevents.
+// Without this, a seal straddling the range boundary finds fewer events than
+// its event_count declares, producing a false GAP or MERKLE_MISMATCH.
 func TestVerifySeals_PartialRange_SkipLogic(t *testing.T) {
 	base := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
 
-	// Events e1..e10 span base+0ms..base+9ms.
+	// Events e1..e10 span base+0ms..base+9ms (as verifySeals would load them).
 	var events []AuditEvent
 	for i := 0; i < 10; i++ {
 		events = append(events, AuditEvent{
@@ -223,44 +221,63 @@ func TestVerifySeals_PartialRange_SkipLogic(t *testing.T) {
 		})
 	}
 
-	// rangeMinTS and rangeMaxTS as verifySeals computes them.
-	rangeMinTS := events[0].Timestamp // base+0ms
-	rangeMaxTS := events[len(events)-1].Timestamp // base+9ms
+	// rangeMinTS / rangeMaxTS as verifySeals computes them from the events slice.
+	rangeMinTS := events[0].Timestamp                    // base+0ms
+	rangeMaxTS := events[len(events)-1].Timestamp        // base+9ms
 
-	// Case 1: Seal fully within range [base+2ms, base+7ms] — 6 events.
-	sealStart := base.Add(2 * time.Millisecond)
-	sealEnd := base.Add(7 * time.Millisecond)
-	within := !(sealStart.Before(rangeMinTS) || sealEnd.After(rangeMaxTS))
-	if !within {
-		t.Errorf("P2: seal [+2ms,+7ms] within range [+0ms,+9ms] should NOT be skipped")
+	// Case 1: seal fully within range — sealOutsideRange must return false.
+	s1 := Seal{
+		ID:          "seal-within",
+		BatchNumber: 1,
+		StartTime:   base.Add(2 * time.Millisecond),
+		EndTime:     base.Add(7 * time.Millisecond),
+		EventCount:  6,
 	}
-	leaves := collectLeaves(events, "org1", sealStart, sealEnd)
-	if len(leaves) != 6 {
-		t.Errorf("P2: expected 6 leaves for [+2ms,+7ms], got %d", len(leaves))
+	if sealOutsideRange(s1, rangeMinTS, rangeMaxTS) {
+		t.Errorf("P2 regression: sealOutsideRange returned true for seal [+2ms,+7ms] within range [+0ms,+9ms]")
+	}
+	// Also confirm collectLeaves finds the right 6 events.
+	leaves1 := collectLeaves(events, "org1", s1.StartTime, s1.EndTime)
+	if len(leaves1) != 6 {
+		t.Errorf("P2: expected 6 leaves for [+2ms,+7ms], got %d", len(leaves1))
 	}
 
-	// Case 2: Seal straddling the left boundary [base-1ms, base+5ms] — skip.
-	sealStart2 := base.Add(-1 * time.Millisecond) // before range
-	sealEnd2 := base.Add(5 * time.Millisecond)
-	wouldSkip2 := sealStart2.Before(rangeMinTS) || sealEnd2.After(rangeMaxTS)
-	if !wouldSkip2 {
-		t.Errorf("P2: seal straddling left boundary should be skipped")
+	// Case 2: seal straddling the left boundary — sealOutsideRange must return true.
+	// Without the skip, collectLeaves finds 6 events (e1..e6) but event_count
+	// would declare 7 (e0..e6 if the seal started at base-1ms), causing false GAP.
+	s2 := Seal{
+		ID:          "seal-left-straddle",
+		BatchNumber: 2,
+		StartTime:   base.Add(-1 * time.Millisecond), // before rangeMinTS
+		EndTime:     base.Add(5 * time.Millisecond),
+		EventCount:  7, // claims events before our range
 	}
-	// Without the skip, collectLeaves would find only 6 events (e1..e6), not
-	// the 7 that the seal's event_count would declare — causing a false GAP.
-	leavesWithoutSkip := collectLeaves(events, "org1", sealStart2, sealEnd2)
-	if len(leavesWithoutSkip) != 6 {
-		t.Errorf("P2: expected 6 leaves without skip (events only start at base+0ms), got %d", len(leavesWithoutSkip))
+	if !sealOutsideRange(s2, rangeMinTS, rangeMaxTS) {
+		t.Errorf("P2 regression: sealOutsideRange returned false for seal straddling left boundary — false GAP would occur without skip")
 	}
-	// The skip IS the fix: verifySeals records a note and continues rather
-	// than comparing 6 < declared_7 and returning exitGap.
 
-	// Case 3: Seal straddling the right boundary [base+5ms, base+11ms] — skip.
-	sealStart3 := base.Add(5 * time.Millisecond)
-	sealEnd3 := base.Add(11 * time.Millisecond) // after range
-	wouldSkip3 := sealStart3.Before(rangeMinTS) || sealEnd3.After(rangeMaxTS)
-	if !wouldSkip3 {
-		t.Errorf("P2: seal straddling right boundary should be skipped")
+	// Case 3: seal straddling the right boundary — sealOutsideRange must return true.
+	s3 := Seal{
+		ID:          "seal-right-straddle",
+		BatchNumber: 3,
+		StartTime:   base.Add(5 * time.Millisecond),
+		EndTime:     base.Add(11 * time.Millisecond), // after rangeMaxTS
+		EventCount:  6, // claims events beyond our range
+	}
+	if !sealOutsideRange(s3, rangeMinTS, rangeMaxTS) {
+		t.Errorf("P2 regression: sealOutsideRange returned false for seal straddling right boundary — false GAP would occur without skip")
+	}
+
+	// Case 4: seal exactly at the range boundaries — must NOT be skipped.
+	s4 := Seal{
+		ID:          "seal-exact-range",
+		BatchNumber: 4,
+		StartTime:   rangeMinTS,
+		EndTime:     rangeMaxTS,
+		EventCount:  10,
+	}
+	if sealOutsideRange(s4, rangeMinTS, rangeMaxTS) {
+		t.Errorf("P2 regression: sealOutsideRange returned true for seal exactly at range boundaries")
 	}
 }
 

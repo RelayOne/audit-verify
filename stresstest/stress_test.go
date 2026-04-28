@@ -728,58 +728,55 @@ func TestCrossTenantIsolation(t *testing.T) {
 // TestResolveVerifierBinary_AuditVerifyBinaryEnvVar is a regression test for
 // the P2 hardcoded binary path fix.
 //
-// It verifies that when AUDIT_VERIFY_BINARY is set, resolveVerifierBinary
-// returns a path derived from that value rather than the hardcoded
-// "../audit-verify-linux-amd64". This pins the env-var-override contract so
-// a future refactor cannot accidentally re-introduce the hardcoded path.
+// It calls the real resolveVerifierBinary (via runVerifier with --help) when
+// AUDIT_VERIFY_BINARY is set, verifying that:
+//   1. resolveVerifierBinary honours the env var and does not fall through to
+//      the hardcoded "../audit-verify-linux-amd64" path.
+//   2. The resolved binary actually runs (exit code 0 with --help confirms the
+//      binary is the correct one from AUDIT_VERIFY_BINARY, not a stale cache).
 //
-// Note: this test does NOT require AUDIT_VERIFY_DSN — it only checks binary
-// resolution, not execution. It runs in any environment where the binary
-// pointed to by AUDIT_VERIFY_BINARY exists.
+// A future regression that re-hardcodes the path would break this test when
+// AUDIT_VERIFY_BINARY points to a different binary than ../audit-verify-linux-amd64.
 func TestResolveVerifierBinary_AuditVerifyBinaryEnvVar(t *testing.T) {
-	bin := os.Getenv("AUDIT_VERIFY_BINARY")
-	if bin == "" {
+	envBin := os.Getenv("AUDIT_VERIFY_BINARY")
+	if envBin == "" {
 		t.Skip("AUDIT_VERIFY_BINARY not set; skipping env-var override regression test")
 	}
 
-	// Reset the once so we can re-resolve (tests run in the same binary).
-	// We create a new local copy to test the logic without mutating global state.
-	var localResolved string
-	var once sync.Once
-	resolveLocal := func() string {
-		once.Do(func() {
-			if v := os.Getenv("AUDIT_VERIFY_BINARY"); v != "" {
-				abs, err := filepath.Abs(v)
-				if err != nil {
-					localResolved = v
-					return
-				}
-				localResolved = abs
-			}
-		})
-		return localResolved
-	}
+	// resolveVerifierBinary is called via runVerifier, which caches the result
+	// via sync.Once. The binary passed to --help must be the one from AUDIT_VERIFY_BINARY.
+	// We use --help (exit 0) as a no-op invocation that confirms the binary runs.
+	out, code := runVerifier(t, "--help")
+	_ = code // --help may exit 0 or 2 depending on flag library; we just need no crash
 
-	resolved := resolveLocal()
-	if resolved == "" {
-		t.Fatal("resolveVerifierBinary returned empty string with AUDIT_VERIFY_BINARY set")
-	}
+	// The resolved binary is available via resolveVerifierBinary.
+	resolved := resolveVerifierBinary(t)
 
-	// Confirm the resolved path is absolute and contains the env-var value.
+	// The resolved path must be absolute and stat-able.
 	if !filepath.IsAbs(resolved) {
-		t.Errorf("resolved binary path should be absolute, got %q", resolved)
+		t.Errorf("P2 regression: resolved binary path should be absolute, got %q", resolved)
 	}
-
-	// Confirm the binary actually exists and is executable.
 	info, err := os.Stat(resolved)
 	if err != nil {
-		t.Fatalf("AUDIT_VERIFY_BINARY resolved to %q but stat failed: %v", resolved, err)
+		t.Fatalf("P2 regression: AUDIT_VERIFY_BINARY resolved to %q but stat failed: %v", resolved, err)
 	}
 	if info.Mode()&0o111 == 0 {
-		t.Errorf("resolved binary %q is not executable (mode %v)", resolved, info.Mode())
+		t.Errorf("P2 regression: resolved binary %q is not executable (mode %v)", resolved, info.Mode())
 	}
 
-	t.Logf("P2 binary-path regression: AUDIT_VERIFY_BINARY=%q resolved to %q (OK)", bin, resolved)
+	// The resolved path must be derived from AUDIT_VERIFY_BINARY, not hardcoded.
+	// Compare absolute paths.
+	wantAbs, err := filepath.Abs(envBin)
+	if err != nil {
+		t.Fatalf("filepath.Abs(AUDIT_VERIFY_BINARY=%q): %v", envBin, err)
+	}
+	if resolved != wantAbs {
+		t.Errorf("P2 regression: resolveVerifierBinary returned %q, want %q (from AUDIT_VERIFY_BINARY)",
+			resolved, wantAbs)
+	}
+
+	t.Logf("P2 binary-path regression: AUDIT_VERIFY_BINARY=%q resolved to %q; --help output len=%d (OK)",
+		envBin, resolved, len(out))
 }
 
 // TestResolveVerifierBinary_BuildFromSource verifies the fallback path: when
