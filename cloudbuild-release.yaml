@@ -112,6 +112,8 @@ steps:
     script: |
       #!/bin/bash
       set -euo pipefail
+      # Install GitHub CLI (not present in cloud-sdk:slim).
+      apt-get update -qq && apt-get install -yqq gh
       export GH_TOKEN="$GITHUB_TOKEN"
       TAG="$TAG_NAME"
       # Create the release if it does not exist, then upload (--clobber) artifacts.
