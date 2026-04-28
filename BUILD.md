@@ -65,15 +65,12 @@ brew install cosign            # macOS
 go install github.com/sigstore/cosign/v2/cmd/cosign@latest  # any platform
 
 # Verify a binary (example: linux/amd64)
+# The canonical GCP KMS URI form is:
+#   gcpkms://projects/<proj>/locations/<loc>/keyRings/<ring>/cryptoKeys/<key>/cryptoKeyVersions/<ver>
+# (note: cryptoKeys/<name> then cryptoKeyVersions/<version> — NOT cryptoKeyVersions/<name>)
 cosign verify-blob audit-verify-linux-amd64 \
-  --key gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeyVersions/audit-verify-signing/cryptoKeyVersions/1 \
+  --key gcpkms://projects/relayone-488319/locations/global/keyRings/release-signing/cryptoKeys/audit-verify-signing/cryptoKeyVersions/1 \
   --signature audit-verify-linux-amd64.sig
-
-# Or verify using the bundled detached signature + certificate (keyless):
-cosign verify-blob audit-verify-linux-amd64 \
-  --bundle audit-verify-linux-amd64.bundle \
-  --certificate-oidc-issuer https://accounts.google.com \
-  --certificate-identity <release-service-account>@relayone-488319.iam.gserviceaccount.com
 ```
 
 ## CI/CD: Cloud Build (not GitHub Actions)
