@@ -49,9 +49,11 @@ steps:
       sha256sum /workspace/dist/audit-verify-* > /workspace/dist/SHA256SUMS
       cat /workspace/dist/SHA256SUMS
 
-  - name: gcr.io/projectsigstore/cosign:v2
+  - name: gcr.io/projectsigstore/cosign:v2.2.0
     id: cosign-linux-amd64
     waitFor: [sha256sums]
+    env:
+      - COSIGN_YES=true
     args:
       - sign-blob
       - /workspace/dist/audit-verify-linux-amd64
@@ -60,9 +62,11 @@ steps:
       - --output-signature
       - /workspace/dist/audit-verify-linux-amd64.sig
 
-  - name: gcr.io/projectsigstore/cosign:v2
+  - name: gcr.io/projectsigstore/cosign:v2.2.0
     id: cosign-darwin-amd64
     waitFor: [sha256sums]
+    env:
+      - COSIGN_YES=true
     args:
       - sign-blob
       - /workspace/dist/audit-verify-darwin-amd64
@@ -71,9 +75,11 @@ steps:
       - --output-signature
       - /workspace/dist/audit-verify-darwin-amd64.sig
 
-  - name: gcr.io/projectsigstore/cosign:v2
+  - name: gcr.io/projectsigstore/cosign:v2.2.0
     id: cosign-darwin-arm64
     waitFor: [sha256sums]
+    env:
+      - COSIGN_YES=true
     args:
       - sign-blob
       - /workspace/dist/audit-verify-darwin-arm64
@@ -82,9 +88,11 @@ steps:
       - --output-signature
       - /workspace/dist/audit-verify-darwin-arm64.sig
 
-  - name: gcr.io/projectsigstore/cosign:v2
+  - name: gcr.io/projectsigstore/cosign:v2.2.0
     id: cosign-windows-amd64
     waitFor: [sha256sums]
+    env:
+      - COSIGN_YES=true
     args:
       - sign-blob
       - /workspace/dist/audit-verify-windows-amd64.exe
