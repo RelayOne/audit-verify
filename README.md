@@ -140,3 +140,8 @@ exits. There is no outbound network call to any vendor endpoint.
 Apache-2.0. See `LICENSE` in this directory. The source code itself is
 the proof of the guarantee — anyone can audit it, rebuild it, or replace
 it with an alternative implementation that reads the same schema.
+
+## Environments
+
+Single-branch model: `main` is the only env branch; protected against force-push and deletion (per portfolio spec 07).
+
